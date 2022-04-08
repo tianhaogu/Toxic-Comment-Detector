@@ -4,6 +4,7 @@ import json
 import tweepy
 import configparser
 from scorer import *
+from dynamodb import *
 
 NUM_PER_USER = 500
 NUM_PER_TWEET = 300

@@ -37,6 +37,7 @@ def insert_tweet(tweet_id, tweet_text, tweet_author):
         }
     )
 
+
 if __name__ == "__main__":
     print(query_tweet(2345678))
     #insert_tweet(2345678, "I want to have dinner!!", "william_tianhao")
