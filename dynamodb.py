@@ -14,6 +14,10 @@ __TableTweets__ = "Tweets"
 Primary_Column_Tweets = "TWEET_ID"
 table_tweets = db.Table(__TableTweets__)
 
+__TableReplies__ = "Replies"
+Primary_Column_Replies = "REPLY_ID"
+table_replies = db.Table(__TableReplies__)
+
 def query_user(screen_name):
     response = table_users.query(
         KeyConditionExpression=Key(Primary_Column_Users).eq(screen_name)
@@ -34,6 +38,22 @@ def insert_tweet(tweet_id, tweet_text, tweet_author):
             Primary_Column_Tweets: tweet_id,
             "TWEET_TEXT": tweet_text,
             "TWEET_AUTHOR": tweet_author
+        }
+    )
+
+def query_reply(reply_id):
+    response = table_replies.query(
+        KeyConditionExpression=Key(Primary_Column_Replies).eq(reply_id)
+    )
+    item = response["Items"]
+    return False if len(item) == 0 else True
+
+def insert_reply(reply_id, reply_text, reply_to_id):
+    table_replies.put_item(
+        Item = {
+            Primary_Column_Replies: reply_id,
+            "REPLY_TEXT": reply_text,
+            "REPLY_TO_ID": reply_to_id
         }
     )
 
