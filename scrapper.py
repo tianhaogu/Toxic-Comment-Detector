@@ -1,17 +1,20 @@
-import requests
-import os
 import json
 import tweepy
 import configparser
+import argparse
+from decimal import Decimal
 from scorer import *
 from dynamodb import *
 
+
+MODEL = OnlineToxicScorer()
 NUM_PER_USER = 500
 NUM_PER_TWEET = 300
 NUM_PER_REPLY = 100
-USERS = ["william_tianhao", "mikepompeo", "KDTrey5", "SpeakerPelosi", "TeamPelosi", "KingJames"]
-         #"billieeilish", "willsmith", "KimKardashian", "BarackObama", "JoeBiden", "AnneeJHathaway"]#, 
-         #"CNN", "FoxNews", "nytimes"]
+USERS = ["KingJames"]
+# USERS = ["william_tianhao", "mikepompeo", "KDTrey5", "SpeakerPelosi", "billieeilish", "willsmith", 
+#          "KimKardashian", "BarackObama", "JoeBiden", "TeamPelosi", "AnneeJHathaway", 
+#          "CNN", "FoxNews", "nytimes"]
 
 def get_api():
     config = configparser.ConfigParser()
@@ -35,7 +38,15 @@ def process_text(text):
         return new_text
     return text
 
-def get_tweet_replies(api, replied_tweet_, all_tweets_replies_):
+def infer_text(tweet_text_):
+    model_inference = MODEL.inference([tweet_text_])
+    model_inference_list = model_inference.tolist()
+    model_scores = [
+        json.loads(json.dumps(inference), parse_float=Decimal) for inference in model_inference_list
+    ]
+    return model_inference, model_scores
+
+def get_tweet_replies_insert(api, replied_tweet_, all_tweets_replies_, screen_name):
     """Recursive function to get all nested replies to the first layer of replies of the current user."""
     curr_replied_user = replied_tweet_.user.screen_name
     replied_replied_tweets = tweepy.Cursor(
@@ -49,36 +60,53 @@ def get_tweet_replies(api, replied_tweet_, all_tweets_replies_):
                 tweet_text = process_text(nested_replied_tweet.full_text)
                 if len(all_tweets_replies_) >= NUM_PER_USER:
                     return
-                all_tweets_replies_.append(tweet_text)
+                model_inference, model_scores = infer_text(tweet_text)
+                insert_reply(
+                    nested_replied_tweet.id, tweet_text, replied_tweet_.id, model_scores, screen_name
+                )
+                all_tweets_replies_.append((tweet_text, model_inference))
                 try:
-                    get_tweet_replies(
-                        api, nested_replied_tweet, all_tweets_replies_
+                    get_tweet_replies_insert(
+                        api, nested_replied_tweet, all_tweets_replies_, screen_name
                     )
                 except Exception as e:
                     print(e)
 
-def get_tweets_user(api, screen_name):
+def get_tweets_user_insert(api, screen_name):
     """For the current user, the first layer is the original tweets, then the direct replies."""
     all_tweets_replies = []
     original_tweets = api.user_timeline(
         screen_name=screen_name, exclude_replies=True
     )
     for original_tweet in original_tweets:
+        if args.tweet_restriction:
+            if (query_tweet(original_tweet.id, False)):
+                continue
+        insert_tweet(
+            original_tweet.id, original_tweet.text, screen_name
+        )
         replied_tweets = tweepy.Cursor(
             api.search_tweets, q='to:' + screen_name, 
             lang='en', since_id=original_tweet.id, 
             tweet_mode="extended", result_type='recent'
         ).items(NUM_PER_TWEET)
         for replied_tweet in replied_tweets:
+            if args.reply_restriction:
+                if (query_reply(replied_tweet.id, False)):
+                    continue
             if hasattr(replied_tweet, 'in_reply_to_status_id_str'):
                 if (replied_tweet.in_reply_to_status_id_str == original_tweet.id_str):
                     tweet_text = process_text(replied_tweet.full_text)
                     if len(all_tweets_replies) >= NUM_PER_USER:
                         return all_tweets_replies
-                    all_tweets_replies.append(tweet_text)
+                    model_inference, model_scores = infer_text(tweet_text)
+                    insert_reply(
+                        replied_tweet.id, tweet_text, original_tweet.id, model_scores, screen_name
+                    )
+                    all_tweets_replies.append((tweet_text, model_inference))
                     try:
-                        get_tweet_replies(
-                            api, replied_tweet, all_tweets_replies
+                        get_tweet_replies_insert(
+                            api, replied_tweet, all_tweets_replies, screen_name
                         )
                     except Exception as e:
                         print(e)
@@ -88,29 +116,44 @@ def get_tweets_all_users(api):
     """Loop over all users and get map of user and corresponding relies to recent tweets."""
     all_tweets_users = {}
     for screen_name in USERS:
-        all_tweets_users[screen_name] = get_tweets_user(api, screen_name)
+        if args.user_restriction:
+            if (query_user(screen_name, False)):
+                continue
+        all_tweets_users[screen_name] = get_tweets_user_insert(api, screen_name)
         print(f"{screen_name}: {len(all_tweets_users[screen_name])}")
-        print(all_tweets_users[screen_name])
-        print('\n')
+        for elem in all_tweets_users[screen_name]:
+            print(elem[0])
+            print(elem[1])
+            print('\n')
+        # with open("results_split.txt", 'w') as f:
+        #     f.write(f"{screen_name}: {len(all_tweets_users[screen_name])} \n")
+        #     for elem in all_tweets_users[screen_name]:
+        #         f.write(elem[0] + '\n')
+        #         f.write(str(elem[1])[1: -1] + '\n')
+        #         f.write('\n')
+        #     f.write('\n\n')
     return all_tweets_users
 
 
 if __name__ == "__main__":
-    # api = get_api()
-    s = OnlineToxicScorer()
-    # all_tweets_replies = get_tweets_all_users(api)
-    # for username, tweets_replies in all_tweets_replies.items():
-    #     user_inference = s.inference(tweets_replies)
-    #     print(username + ": ")
-    #     print(user_inference)
-    #     print('\n')
-    mylst = ['@POTUS I would like to express my condolences to Speaker Pelosi for contracting the covid-19 and wish you a speedy recovery. What you should do is not to postpone the visit, but to cancel it immediately——from @zlj517', '@POTUS And on the subject of saving money can you tell me why taxpayers have to pay for a Chaplain of the House at $172,500???', '@POTUS Lowering costs? Have you been grocery shopping lately? Oh, wait. It would barely be a blip on your radar with the money you have. When you do the polls. try asking we regular folk about our opinions.', '@POTUS Oh and good stock tips real quick thanks 👍', "@POTUS Why aren't you complaining about all the people with COVID including you ..in the white House ...oh wait you want our attention somewhere else", '@POTUS Why anyone calling themselves a Democrat would vote for a multimillionaire like you. I would suspect voter fraud or lack of Democratic choice of a candidate', '@POTUS Nothing to do with you or @POTUS. As the owner of a mom and pop business we got zero help to make it through a shutdown', "@POTUS Why don't you stop government entities and law enforcement from using social media to stalk &amp; abuse citizens targeting innocent people at our homes through the use of social media &amp; IMSI catchers. Prevent constitutional infringements of people's Rights &amp; Freedoms? It's your Job.", '@POTUS Why not allow citizens who are harmed in various other ways by social media companies to sue and hold them accountable for the life damaging effects of social media? Why do you refuse to protect the millions of citizens who have been hurt &amp; continue to suffer from the effects?', '@POTUS and by causing more chaos in rest of the world～', '@POTUS How about this b https://t.co/G9Oz3GENeq', '@POTUS Yet inflation and high prices persist', '@POTUS You have the power to change this world I know in my heart you will do the right thing your a very courages woman when I look into your eyes I see true freedom https://t.co/IzOrrcMVm3', '@POTUS Do you even believe the crap your selling. Your the reason things are this bad. You turned more democrats to Republicans then anybody ever. Everyone seen the 3 great years we had. Jesus christ how can you be so bad at everything.', '@POTUS Speaker,We use United Nations to fix Every Russian Leaders Brains with the brain signal computer system to save Every Ukrainian Leaders, before all is lost.', "@POTUS How do we get Biden and Dem polling #'s up? Why are so many americans feeling Down about the country with this economy so strong? Highly concerned about a republican sweep in mid-terms and then Trump running in 2024. Our Democracy can not withstand another Trump presidency!", 
-    '@POTUS What about the skyrocketing inflation that is happening? It cost me over $52 to fill up my tank yesterday, everything is more expensive than it was 17 months ago. Demoncrats are hell bent on destroying the USA.', '@POTUS super spearder', '@POTUS STOP IGNORING POVERTY/HOMELESS #s that R rising-life long dem @SenateDems @HouseDemocrats @harrisonjaime @DNC @potus @vp @cnn @msnbc don’t care what you’ve done - Americans across board R suffering now! Need immediate HELP! #ChildTaxCredit mo - poverty effects 💯of kids in it', '@POTUS It is a disgrace that Trump and many Republicans are Puppets of Putin !', "@POTUS I call bull crap on this and anything else you claim. Our economy sucks and prices are too high but you don't care one bit. We the people want you gone and tried for crimes on society", '@POTUS Can you give us some if the 400 million you personally made on your stock portfolio? Your investments have bankrupt many regular Americans. Also, approve @Novavax cause we know you’re shortingbit and holding it back.', '@POTUS Sure and DEMONRATS were also the ones who took 8900 from us the day Biden took office. TRUMP 2024 !', '@POTUS I love how all you democrats are taking advantage of job creation which is just coming back cause your allowing people to go back to work.', '@POTUS Stimulus, please! Still hurting!!', '@POTUS Feel better, Nancy!', '@POTUS Allowing seditionists and criminals to remain in office and out of jail is the opposite of working for the people.', "@POTUS As a Latino, being leftist is not the problem. Stop treating your left flank as an issue instead of a strength. New blood can't come fast enough.", '@POTUS you scared?', '@POTUS Umm lies.', '@POTUS Why are you continuing to lie? These jobs being filled are ones you and your party caused to. E vacated in the first place. There are mo new jobs.', '@POTUS This is laughable.', '@POTUS I am so sick of the Democrats taking credit for these jobs! Everyone KNEW the economy would bounce back after COVID so NO Nancy it wasn’t you or any other democrat! It was people going BACK to work 🤦\u200d♀️😡', '@POTUS Remember all those cannabis workers? You could add that to your tally if @SenSchumer stopped blocking #SAFEBankingAct &amp; #moreact https://t.co/1FG5tM1TAI', '@POTUS So why the bail out on student loans?', "@POTUS Do you actually believe the stuff you tweet? The American people don't. Better enjoy it now because November is coming...", '@POTUS Those are not new jobs.', '@POTUS Sorry you tested positive; glad you feel okay.', "@POTUS She's drunk again....", "@POTUS Dear Friends Im from Afghanistan I have graduated from school in 2017 but can't continue my studies here because of economic problems. There are no jobs here in Afghanistan.Please anyone help me I can't leave afghanistan without help Contact me twiter or whatsapp +93744072516", 
-    '@POTUS Im from Afghanistan. Am 23 years old. I have not good economic to study here here too poverty. My family( my mother and my sister) too need to my help😔😔. I want leave country. Please anyone help me to go England or.... please help me', '@POTUS My name is Ahsanullah from Afghanistan and am 23 years old. Here Afghanistan not jobs and here economic problems. Im trying to leave Afghanistan but I cant leave because of poverty Please anyone help me to go England,Canada .... Send me message or my whatsapp +93744072516 Please', '@POTUS Please anyone help me to go England or canada. Help me likes a brother or likes a sister. Or please sponser me to go england or canada I will pay back your money in one or two years. Please help me to leave Afganistan please', '@POTUS Wow! 7.9 million "new jobs"! This is great news! Now people can pay back the student loans they asked for, agreed to the terms of and used instead of transferring them to taxpayers! Well done!', '@POTUS Lowering costs is the key task now.', '@POTUS Yawn.', '@POTUS Does that include you and your husband Mrs Pelosi?', '@POTUS Lies lies lies drinking again I see', '@POTUS Just think how much we could accomplish without Republican obstruction...', '@POTUS Do you really have Covid? I think it is an excuse because Chairman Xi scared you out of your scheduled trip to Taiwan....freed up some time too really swill some vodka. Counting down the days till we are rid of you as Speaker. You have been bad for Democracy.', '@POTUS Lowering cost 🤬😡, how is that going Nancy since Joe took office???', '@POTUS Nancy, I don’t like you🤨', '@POTUS If you get your job back after losing it due to insane COVID restrictions put on by libs, that’s isn’t Job creation. That’s getting your job back.', '@POTUS Some are wondering why or how you people in congress can legislate Healthcare or other issues fairly when you.. A. Get money through corporate "campaign donations" B. Get money through "legal" lobbying. C. Get inside information when you legislate these corps and trade stocks', '@POTUS Send me a DM ill trade for you', '@POTUS Doubt it. You do not represent me', '@POTUS Drunk lies.', '@POTUS This is misinformation - how are people going back to work creating new jobs ? Name 3 new jobs Biden has created please….and do not include Hunters law firm , art sales , or energy firm. Thanks !', "@POTUS Don't you feel ashamed of those who can be plundered? Be careful to go to hell. https://t.co/BjY3Gr7Y24", '@POTUS Nice try, Pelosi. However, 9.4 MILLION JOBS were CUT in in 2020 due to covid. By gaining back only 7.9 MILLION jobs, Biden has still suffered a LOSS of 1.5 MILLION JOBS that were created by PRESIDENT TRUMP. https://t.co/DHGXVHp82f']#, 
-    # '@POTUS All it took was $7t in debt and record inflation', '@POTUS Good question 🤣🤣🤣🤣🇱🇷🇱🇷🇱🇷🇱🇷', "@POTUS - - - Growing Paychecks? - - - Secretary Pete c        ould do that immediately. But the ATA owns Congress, so he doesn't do what he's supposed to do. It's all rigged for the wealthy. https://t.co/NGHNpBFlU5", "@SpeakerPelosi @POTUS I am retired from wholesale electrical industry. I am familiar with logistics. I see many good LTL lines looking for drivers. Are you referring to independent drivers? I'm willing to send Pete a letter or two.)", '@POTUS Lower costs? Gas increased over 200%. Food is up over 20%, all other retail prices have increased significantly. You reneged on the minimum wage to pull over 40% of workers out of abject poverty. Everything you say you are doing is actually the reverse that is happening. Pariahs.', '@POTUS lowering cost of what your lawn maintenance. Gas up cost to buy a car has gone up food way up. This looks like 1979 all over again. Too Bad Reagan cant run.', "@POTUS Speaker what NEW Created Jobs at what NEW Formed Companies in USA ? Please be more specific since You are not telling the True Facts !!! Joe's companies Hired these ? Your Husband hire all these people - where are the Companies located at ? Have Drew your spokes tell all", '@POTUS Really? He CREATED jobs? guess you forget an entire country left their job due to a pandemic. MANY businesses closing FOR GOOD. 4.5 MIL in Nov, 4.3 in Dec, 69 MILLION IN 2021 QUIT! So we only need a note 61 MILLION JOBS! Numbers don’t lie, people do! https://t.co/b6whVACpNS', '@POTUS Those jobs would have been created a year earlier if we had simply ReOpened. Your administration created Inflation that is choking Recovery. You insisted on $Ts in "Subsidies" that DELAYED ReOpening. Then you blew Afghanistan. Now Ukraine. TERRIBLE assessments. &amp; CramDown Judge. https://t.co/hRSY5PjOxj', "@POTUS The Al-Amiriya Shelter massacre in Iraq is one of America's greatest crimes against the Iraqi people. The US military killed dozens of civilians, including children and women, with targeted shelling in an Iraqi shelter. #America is the mother of terrorism https://t.co/7PqDAdPZlk", '@POTUS What stocks should I buy?', "@SpeakerPelosi @POTUS I'm sure there's a website somewhere that tells you what stocks they buy. But I'm assuming that was rhetorical question.", '@POTUS You had smelling salts for breakfast https://t.co/54RwocRxnF', '@POTUS Interesting 7.9 same rate for inflation 7.9% almost biblical!!! Scary!!!! Everything is lining up for a severe recession', '@POTUS Traitor! Where is manual? How to control the vote machine 🤗🤗🤗', '@POTUS How is your portfolio looking?', "@POTUS Meanwhile Republicans are more concerned with stopping people from talking about LGBT people, making sure you can marry children and banning books and women's reproduction rights.", "@POTUS Shouldn't you be in quarantine?", '@POTUS Now cancel student debt!', "@SpeakerPelosi @POTUS Why should we pay for someone's debt....they chose to go to college. I cannot ba k that. I paid for college. My kids have paid for theirs. You want to get rid of someone's debt...cover cancer patients. College is a choice...Cancer is NOT!", 
-    # '@POTUS Get well Madam Speaker. 👋🇿🇦', "@POTUS Reopening the economy isn't the same as creating.",   '@POTUS Go now Brandoms, let Maga return!', '@SpeakerPelosi @POTUS Absolutely not! https://t.co/20T7cacVyn', '@SpeakerPelosi @POTUS Coming soon! https://t.co/KzN9HK375C', '@SpeakerPelosi @POTUS Yes, to a prison near you!', '@POTUS We need about 2M barrels of domestic production, it would lower inflation by a third and we will require less federal rate hikes slowing our economy. Please meet with oil executives and learn how to make it happen.', '@SpeakerPelosi @POTUS What specific government policies are holding oil companies back from producing oil to meet demand?', '@SpeakerPelosi @POTUS I’m not sure, it may not be the governments fault, but they certainly aren’t helping. It may be a good idea for government intervention to incentivize additional production, perhaps immediate expensing of capital investments for additional production.', '@mdowstfl @SpeakerPelosi @POTUS Opec is trying to recoup losses from when covid had everything closed down and people were not buying gas', '@SophiaLee42 @SpeakerPelosi @POTUS Most producers don’t want to produce more, and 2M additional barrels would reduce prices of oil 40%, we should incentivize domestic production by stimulating about 300B in capital expenditures to increase production. Would reduce inflation by a third.', '@bigcxc @SophiaLee42 @SpeakerPelosi @POTUS Murderous greed is the problem here. https://t.co/qtZYSJfL9e', '@bigcxc @SophiaLee42 @SpeakerPelosi @POTUS Pretty much all large producers are facing the same reality and do not want to increase production, government intervention could incentivize more production, or maybe a domestic oil SOE is needed.', '@POTUS Lowering costs of what? Everything is at record highs… #failure 🙄', '@POTUS 🤡🤡🤡🤡🤡🤡 Why did you bow to China?', '@POTUS You have your mask on? Might as wellnget another booster!', '@POTUS Its time to you to go home. https://t.co/4niEF39HTs', '@POTUS Get back into action soon Speaker! Stay well', '@POTUS what about student loan forgiveness', '@SpeakerPelosi @POTUS If enough people downvote and report this bot account then maybe twitter will pull it down.', '@SpeakerPelosi @POTUS According to liberal democrats the economy is awesome, unemployment rate is lowest ever and wages are rising. Seems to me with all that good news you should be able to take that degree and use it to earn an income so you can pay off your loan, you know, like the rest of us do.', '@SpeakerPelosi @POTUS What about mortgage forgiveness?', '@SpeakerPelosi @POTUS Did someone force you to major in liberal arts at a 4 year school ?', '@SpeakerPelosi @POTUS Why should someone else pay for your financial choices?', 'How about this b https://t.co/Pn4qCTJ8TE', 'After seeing the woman’s health bill you endorsed and signed. You care nothing about humans.', 'The raping of a President: Pelosi &amp; DC Mayor Muriel Bowser were responsible but not held accountable because they are privilidged girls - but they will always be promoted &amp; not Drafted because they are privileged girls &amp; the men were prosecuted https://t.co/6wHPzDUAXM', 'Rooting for covid. Let this evil wrinkled crap be gone!', 
-    # 'How are you not being investigated for insider trading. Tesla etc. Walking conflict of interest', 'What the U.S. congress has done to the American People by allowing social media companies to have impunity is a grave injustice and every single one of you has made a mockery of &amp; destroyed the U.S. Constitution &amp; all those who fought &amp; died to defend Democracy &amp; freedom for all', 'Stop spending our money.', 'What the U.S. congress has done to the American People by allowing social media companies to have impunity is a grave injustice and every single one of you has made a mockery of &amp; destroyed the U.S. Constitution &amp; all those who fought &amp; died to defend Democracy &amp; freedom for all.', 'Pelosi &amp; DC Mayor Muriel Bowser were responsible but not held accountable because they are privilidged girls - but they will always be promoted &amp; not Drafted because they are privileged girls &amp; the men were prosecuted https://t.co/6wHPzDV8Nk', 'What the U.S. congress has done to the American People by allowing social media companies to have impunity is a grave injustice and made a mockery of the U.S. Constitution and all those you fought to defend Democracy and freedom for all.', "So you'll not do anything to raise the wages of the working class, but you'll give a hundred billion to rich people that own automated plants? Sounds about right for neoliberal policy.", "The U.S. is not a democracy or a free country, because the government has given itself immunity from infringing on people's constitutional rights by giving imunity to social media companies that the government uses to abuse citizens Constitutiinal Rights and Freedoms!", '#TWITTER IS A GOVERNMENT ENTITY!', 'Say the government approached me, offers my business immunity as they need to use my technology to subvert the U.S. Constitution.Citizens are harmed but have limited recourse due to Government immunity. Is Twitter a Business or Government entity infringing on the constitution?', "It all sounds great but we, on the ground, need help. We're being crushed!", 'Thanks.', 'Say the government approached me, offer my business immunity as they need to use my technology to subvert the U.S. Constitution.Citizens are harmed but have limited recourse because of Government immunity. Is Twitter a Business or Government entity infringing on the constitution?', '4th Stimulus checks!!! To all American people!!!', "We know the top minds in American corporations don't want extreme right wing Republicans running the country. Run on that", 'The Democratic Alliance should first recover the entire territory of Ukraine, then let Putin step down and build a new pro-Western Russian government, then completely isolate CCP to let the Marxist-Leninist communism disappear from the world, then a world peace can be achieved!', "Madam honestly it's like you took Trump's idea and branded it as Bidens. This makes no sense. As long as it benefits your party that's all that matters. What about the American people that you work for? Put American needs first and quit shipping tax dollars on worthless causes.", 'Sound great. May I ask what you are doing to end slavery in the United States?', "your grandmother's leg", 
-    # "Now it's time to cancel student loan debt, if you can send billions to Ukraine, I understand, then cancel your people here debts we can't pay.", 'Please go to china', "All of you have already messed that up by shutting down our gas and oil lines. Then try to blame the Oil companies. Yes there are leases, but you don't mention you are tying their hands by not releasing permits or the rediculous constraints you put on them. FAILURE.!", 'Wishing you a speedy recovery.', 'new puppet installation completed', '@BobbieCavazos76 Not for all the MAGA racists…but I’m overjoyed', 'Hope you get well soon', 'Yes identity politics wins again !', "Yes to 'Law and Order'.... Strength + Wisdom, to one of the Greatest Nations. Blessings", 'How do you know she’s a woman? You’re not a biologist. You’re just a career politician. And a rich one at that.', 'How the VAX working Nancy', 'And Joe Biden is making it all about himself and race.', 'Absolutely Nancy! It is a day to remember in history. This is putting the right pegs in the appropriate holes! She will handle that position in all ramifications!', "Hello Madame Speaker hope you'll speak with Roland Martin in 2022 ? Be safe.", "You're a one ugly b**** for the American people You should be f****** Murphy Murphy because hes just as ugly as you are with your f****** horse teeth Hope all you democrats rotten h*** For being so f****** ugly to the American people", 'Congrats Judge Jackson you certainly deserve this honor!', 'Sorry to hear you tested positive. An extra prayer being sent. The Democrats are not fighting hard against the GOP but as much as I hate to say this you must start calling them out even if you fight like them. I live in Florida and the thought of Ron as Pres is unacceptable', 'How is GITMO', 'It’s beginning to look a lot like the United Front everywhere you go. Oh btw Abbott has some friends of yours he’s bringing to D.C. https://t.co/bXyLPZnsVG', 'I WOULD GIVE ANYTHING IF YOUR ASSISTANT WOULD COME FORWARD AND REVEAL ALL YOUR DIRTY SECRETS!', 'Woman? So she\'s a "woman", now ya know', 'Like anyone cares', 'I WOULD BE OFFENDED IF I WERE JUDGE . SHE WAS SOLELY CHOSEN BECAUSE SHE IS BLACK. BIDEN HAD PROMISED TO PLACE A BLACK FEMALE JUDGE ON THE PANEL PRIOR TO THE RIGGED ELECTION.', '@SpeakerPelosi YOU CANT SAY WOMAN!!! KBJ DOESNT EVEN KNOW WHAT ONE IS. SO ILL FIX IT FOR YOU. "KBJ IS THE 2ND BLACK SUPREME COURT JUSTICE". There, now its politically correct and inline with your WOKE standards.', '@POTUS Thank you very much for your support!', '@POTUS How are you not being investigated for insider trading. Tesla etc. Walking conflict of interest', '@POTUS Pelosi &amp; DC Mayor Muriel Bowser were responsible but not held accountable because they are privilidged girls - but they will always be promoted &amp; not Drafted because they are privileged girls &amp; the men were prosecuted https://t.co/6wHPzDUAXM', '@POTUS Appreciation from Ukraine \U0001fac2', '@POTUS ★Jeremiah Habakkuk Judgment on USA: Diaspora/ Red Dawn/Famine/Pestilence/Sword/Black Horse★ ★CIA &amp; Satanism/Baal Reaps U.S.America Babylon★ ★Galatians 6:7 Perfect Blessing Passes to BRICS★ ★MENE, MENE, TEKEL, UPHARSIN★ https://t.co/0zKU5VEejb https://t.co/quNSmLEKlb', 
-    # '@POTUS Thank you!', "@POTUS But you guys went on recess without touching Lend-Lease! Why? This can't afford a 2 week delay. Recess should have been put off, there are more important things going on right now.", '@POTUS 👏 Thank you, 🇺🇸, for your help! The only morally right strategy f  or the world now is: stronger sanctions on 🇷🇺, more weapons to 🇺🇦, FULL #EmbargoRussianOilandGas! Leadership &amp    ; brave steps of support, everything you can do to #BanRussia #StopPutin &amp; #StopTheWar 🙏', 'Great! I hold CONgress beneath contempt', 'When are you going to stop withholding information? Release the video tapes.', 'Now Garland needs to do his job.', 'Thank you for always working so hard for us and feel better soon, we need you!', 'Get well soon. Take care of yourself.', 'Pelosi &amp; DC Mayor Muriel Bowser were responsible but not held accountable because they are privilidged girls - but they will always be promoted &amp; not Drafted because they are privileged girls &amp; the men were prosecuted https://t.co/6wHPzDUAXM', 'Hopefully you don’t die from COVID 🙄', 'Nancy you be reusing your pictures 😂', 'Great! Now how about they vote to hold YOU in contempt for refusing to release your documents pertaining to January 6, Madam Speaker.', 'Hunter Bidens laptop and the corruption that is happening within this administration needs to be investigated.', "Signora don't waste time in silly issues,you have many more to take care and that need solutions", 'You have never fulfilled your duty to the constitution you fulfilled for Nancy Pelosi to become a millionaire', 'Very doubtful that’s what you’re doing.', 'I believe January 6 was a set up.', 'Who are they?', "NANCY PELOSI YOU KNOW NOTHING ABOUT ARE CONSTITUTION PLEASE STOP ACTING LIKE YOU DO ONE DAY YOU NANCY PELOSI WILL PAY FOR YOUR PART IN CREATING JANUARY 6. LET'S GO BRANDON", "Democrats always looking in the wrong place when she has all the answers let's check your emails and cell phone records along with many other Democrats", '@POTUS This looks a like a picture of a nursing home my grandma used to live in - now I see why US is screwed', '@POTUS Pelosi &amp; DC Mayor Muriel Bowser were responsible but not held accountable because they are privilidged girls - but they will always be promoted &amp; not Drafted because they are privileged girls &amp; the men were prosecuted https://t.co/6wHPzDUAXM', '@POTUS You have Covid! You shouldn’t even be there! You should be isolating at home. And no masks anywhere!!! Just not smart! 😳😳🙄🙄', "@POTUS Right. And now I get to pay for it. Youre right Nancy I'm so lucky tool be working you and for the government, my savior NOT #retirenancy", '@POTUS @BarackObama Pelosi &amp; DC Mayor Muriel Bowser were responsible but not held accountable because they are privilidged girls - but they will always be promoted &amp; not Drafted because they are privileged girls &amp; the men were prosecuted https://t.co/6wHPzDUAXM']
-    inf_array = s.inference(mylst)
-    print(inf_array)
+    parser = argparse.ArgumentParser(description="Toxic Comment Detector")
+    parser.add_argument("--user_restriction", type=bool, default=False)
+    parser.add_argument("--tweet_restriction", type=bool, default=False)
+    parser.add_argument("--reply_restriction", type=bool, default=False)
+    args = parser.parse_args()
+
+    api = get_api()
+    all_tweets_replies = get_tweets_all_users(api)
+    for username, tweets_replies in all_tweets_replies.items():
+        if len(tweets_replies) > 0:
+            text = [elem[0] for elem in tweets_replies]
+            scores = [elem[1] for elem in tweets_replies]
+            print(f"{username}: {len(tweets_replies)}")
+            print(scores)
+            print('\n')
+            # with open("results_merge.txt", 'w') as f:
+            #     f.write(f"{username}: {len(tweets_replies)} \n")
+            #     f.write(str(text))
+            #     for score in scores:
+            #         f.write(str(score)[1: -1] + '\n')
+            #     f.write('\n')
