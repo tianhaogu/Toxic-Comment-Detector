@@ -11,10 +11,9 @@ MODEL = OnlineToxicScorer()
 NUM_PER_USER = 500
 NUM_PER_TWEET = 300
 NUM_PER_REPLY = 100
-USERS = ["KingJames"]
-# USERS = ["william_tianhao", "mikepompeo", "KDTrey5", "SpeakerPelosi", "billieeilish", "willsmith", 
-#          "KimKardashian", "BarackObama", "JoeBiden", "TeamPelosi", "AnneeJHathaway", 
-#          "CNN", "FoxNews", "nytimes"]
+# USERS = ["william_tianhao", "mikepompeo", "KDTrey5", "KingJames", "billieeilish", 
+#          "willsmith", "KimKardashian", "BarackObama", "JoeBiden", "AnneeJHathaway"]
+USERS = ["CNN", "FoxNews", "nytimes"]
 
 def get_api():
     config = configparser.ConfigParser()
