@@ -11,7 +11,7 @@ MODEL = OnlineToxicScorer()
 NUM_PER_USER = 500
 NUM_PER_TWEET = 300
 NUM_PER_REPLY = 100
-# USERS = ["william_tianhao", "mikepompeo", "KDTrey5", "KingJames", "billieeilish", 
+# USERS = ["william_tianhao", "mikepompeo", "KDTrey5", "KingJames", "billieeilish", "SpeakerPelosi",
 #          "willsmith", "KimKardashian", "BarackObama", "JoeBiden", "AnneeJHathaway"]
 USERS = ["CNN", "FoxNews", "nytimes"]
 
@@ -29,6 +29,35 @@ def get_api():
     api = tweepy.API(auth, wait_on_rate_limit=True)
     return api
 
+def print_texts_scores(all_tweets_users, screen_name):
+    print(f"{screen_name}: {len(all_tweets_users[screen_name])}")
+    for elem in all_tweets_users[screen_name]:
+        print(elem[0])
+        print(elem[1])
+        print('\n')
+    # with open("results_split.txt", 'w') as f:
+    #     f.write(f"{screen_name}: {len(all_tweets_users[screen_name])} \n")
+    #     for elem in all_tweets_users[screen_name]:
+    #         f.write(elem[0] + '\n')
+    #         f.write(str(elem[1])[1: -1] + '\n')
+    #         f.write('\n')
+    #     f.write('\n\n')
+
+def print_scores(all_tweets_replies):
+    for username, tweets_replies in all_tweets_replies.items():
+        if len(tweets_replies) > 0:
+            text = [elem[0] for elem in tweets_replies]
+            scores = [elem[1] for elem in tweets_replies]
+            print(f"{username}: {len(tweets_replies)}")
+            print(scores)
+            print('\n')
+            # with open("results_merge.txt", 'w') as f:
+            #     f.write(f"{username}: {len(tweets_replies)} \n")
+            #     f.write(str(text))
+            #     for score in scores:
+            #         f.write(str(score)[1: -1] + '\n')
+            #     f.write('\n')
+
 def process_text(text):
     """Remove the @<username> part of the reply."""
     if text.startswith('@'):
@@ -38,6 +67,7 @@ def process_text(text):
     return text
 
 def infer_text(tweet_text_):
+    """Process the format of list to insert into the dynamodb."""
     model_inference = MODEL.inference([tweet_text_])
     model_inference_list = model_inference.tolist()
     model_scores = [
@@ -119,20 +149,8 @@ def get_tweets_all_users(api):
             if (query_user(screen_name, False)):
                 continue
         all_tweets_users[screen_name] = get_tweets_user_insert(api, screen_name)
-        print(f"{screen_name}: {len(all_tweets_users[screen_name])}")
-        for elem in all_tweets_users[screen_name]:
-            print(elem[0])
-            print(elem[1])
-            print('\n')
-        # with open("results_split.txt", 'w') as f:
-        #     f.write(f"{screen_name}: {len(all_tweets_users[screen_name])} \n")
-        #     for elem in all_tweets_users[screen_name]:
-        #         f.write(elem[0] + '\n')
-        #         f.write(str(elem[1])[1: -1] + '\n')
-        #         f.write('\n')
-        #     f.write('\n\n')
+        print_texts_scores(all_tweets_users, screen_name)
     return all_tweets_users
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Toxic Comment Detector")
@@ -143,16 +161,4 @@ if __name__ == "__main__":
 
     api = get_api()
     all_tweets_replies = get_tweets_all_users(api)
-    for username, tweets_replies in all_tweets_replies.items():
-        if len(tweets_replies) > 0:
-            text = [elem[0] for elem in tweets_replies]
-            scores = [elem[1] for elem in tweets_replies]
-            print(f"{username}: {len(tweets_replies)}")
-            print(scores)
-            print('\n')
-            # with open("results_merge.txt", 'w') as f:
-            #     f.write(f"{username}: {len(tweets_replies)} \n")
-            #     f.write(str(text))
-            #     for score in scores:
-            #         f.write(str(score)[1: -1] + '\n')
-            #     f.write('\n')
+    print_scores(all_tweets_replies)

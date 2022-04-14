@@ -79,6 +79,15 @@ def update_score(reply_id, scores):
         }
     )
 
+def get_score(author):
+    response = table_replies.query(
+        IndexName = "ORIGINAL_AUTHOR-index",  # already set ORIGINAL_AUTHOR as table index
+        KeyConditionExpression = Key('ORIGINAL_AUTHOR').eq(author),
+        ProjectionExpression = "SCORES"
+    )
+    item = response["Items"]
+    return item
+
 
 if __name__ == "__main__":
     original_scores = [0.1645, 0.33245, 0.0389, 0.1356, 0.344564, 0.131]
